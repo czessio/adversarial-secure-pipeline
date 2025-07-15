@@ -1,0 +1,35 @@
+# Core dependencies for adversarial robustness pipeline
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-image>=0.20.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+tqdm>=4.65.0
+pyyaml>=6.0
+pandas>=2.0.0
+opencv-python>=4.7.0
+Pillow>=9.5.0
+
+# Adversarial robustness
+foolbox>=3.3.3
+advertorch>=0.2.3
+
+# Privacy-preserving computation
+tenseal>=0.3.14  # Python bindings for Microsoft SEAL
+
+# Model quantization and optimisation
+onnx>=1.14.0
+onnxruntime>=1.15.0
+
+# Analysis and visualisation
+plotly>=5.14.0
+scikit-learn>=1.3.0
+
+# Development tools
+pytest>=7.3.0
+black>=23.0.0
+flake8>=6.0.0
+jupyter>=1.0.0
+ipywidgets>=8.0.0

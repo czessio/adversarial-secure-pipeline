@@ -1,0 +1,114 @@
+# Configuration for adversarial robustness pipeline
+
+# Data settings
+data:
+  dataset_name: "CIFAR10"  # Options: CIFAR10, CIFAR100, ImageNet
+  data_dir: "./data"
+  batch_size: 128
+  num_workers: 0
+  validation_split: 0.2
+  random_seed: 42
+
+# Preprocessing settings
+preprocessing:
+  lighting_correction:
+    enable_retinex: true
+    retinex_sigma: 50
+    enable_histogram_eq: true
+    clip_limit: 2.0
+    tile_grid_size: [8, 8]
+  
+  augmentation:
+    enable: true
+    random_crop: true
+    random_horizontal_flip: true
+    colour_jitter:
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.1
+
+# Model settings
+model:
+  architecture: "resnet18"  # Options: resnet18, resnet34, resnet50, vgg16
+  num_classes: 10
+  pretrained: true
+  dropout_rate: 0.5
+
+# Training settings
+training:
+  epochs: 5 # <-- currently changing due to devleopment, should be set to 100 by default
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  scheduler:
+    type: "cosine"  # Options: cosine, step, exponential
+    step_size: 30
+    gamma: 0.1
+  
+  early_stopping:
+    enable: true
+    patience: 10
+    min_delta: 0.001
+
+# Adversarial settings
+adversarial:
+  attacks:
+    fgsm:
+      epsilon: 0.03
+      targeted: false
+    
+    pgd:
+      epsilon: 0.03
+      alpha: 0.01
+      num_steps: 40
+      random_start: true
+  
+  training:
+    enable: true
+    attack_ratio: 0.5  # Proportion of adversarial examples in training
+    epsilon_schedule: "linear"  # Options: constant, linear, exponential
+    max_epsilon: 0.03
+
+# Quantization settings
+quantization:
+  enable: true
+  type: "dynamic"  # Options: dynamic, static
+  backend: "qnnpack"  # Options: fbgemm (x86), qnnpack (ARM)
+  calibration_batches: 100
+
+# Privacy settings
+privacy:
+  homomorphic_encryption:
+    enable: true
+    poly_modulus_degree: 8192
+    coeff_mod_bit_sizes: [60, 40, 40, 60]
+    scale_bits: 40
+    batch_encode: true
+
+# Analysis settings
+analysis:
+  bias_metrics:
+    - "accuracy_per_class"
+    - "robustness_per_class"
+    - "lighting_sensitivity"
+    - "perturbation_sensitivity"
+  
+  visualisation:
+    save_plots: true
+    plot_format: "png"
+    dpi: 300
+
+# Hardware settings
+hardware:
+  device: "cuda"  # Options: cuda, cpu
+  mixed_precision: true
+  cudnn_benchmark: true
+
+# Logging settings
+logging:
+  level: "INFO"
+  save_dir: "./results/logs"
+  tensorboard: true
+  wandb:
+    enable: false
+    project_name: "adversarial_robustness"
