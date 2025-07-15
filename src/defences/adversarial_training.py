@@ -225,17 +225,18 @@ class AdversarialTrainer:
         correct = 0
         total = 0
         
-        with torch.no_grad() if attack is None else torch.enable_grad():
-            for data, target in val_loader:
-                data, target = data.to(self.device), target.to(self.device)
-                
-                if attack == 'fgsm':
-                    data.requires_grad_(True)  # Enable gradients for attack
-                    data = self.fgsm.generate(self.model, data, target)
-                elif attack == 'pgd':
-                    data.requires_grad_(True)  # Enable gradients for attack
-                    data = self.pgd.generate(self.model, data, target)
-                
+        for data, target in val_loader:
+            data, target = data.to(self.device), target.to(self.device)
+            
+            if attack == 'fgsm':
+                # Generate adversarial examples
+                data = self.fgsm.generate(self.model, data, target)
+            elif attack == 'pgd':
+                # Generate adversarial examples
+                data = self.pgd.generate(self.model, data, target)
+            
+            # Evaluate
+            with torch.no_grad():
                 outputs = self.model(data)
                 loss = criterion(outputs, target)
                 

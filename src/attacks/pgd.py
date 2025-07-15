@@ -70,7 +70,8 @@ class PGDAttack:
             x_adv = x.clone()
         
         for step in range(self.num_steps):
-            x_adv.requires_grad_(True)
+            x_adv = x_adv.detach()
+            x_adv.requires_grad = True
             
             # Forward pass
             outputs = model(x_adv)
@@ -82,18 +83,21 @@ class PGDAttack:
                 loss = F.cross_entropy(outputs, y)
             
             # Calculate gradients
+            model.zero_grad()
             loss.backward()
-            grad = x_adv.grad.detach()
             
-            # Update adversarial examples
-            x_adv = x_adv.detach() + self.alpha * grad.sign()
-            
-            # Project back to epsilon ball around original input
-            delta = torch.clamp(x_adv - x, -self.epsilon, self.epsilon)
-            x_adv = x + delta
-            
-            # Ensure valid pixel range
-            x_adv = torch.clamp(x_adv, self.clip_min, self.clip_max)
+            # Get gradient
+            with torch.no_grad():
+                grad_sign = x_adv.grad.sign()
+                # Update adversarial examples
+                x_adv = x_adv + self.alpha * grad_sign
+                
+                # Project back to epsilon ball around original input
+                delta = torch.clamp(x_adv - x, -self.epsilon, self.epsilon)
+                x_adv = x + delta
+                
+                # Ensure valid pixel range
+                x_adv = torch.clamp(x_adv, self.clip_min, self.clip_max)
         
         return x_adv.detach()
     
