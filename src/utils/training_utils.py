@@ -83,13 +83,13 @@ class LearningRateScheduler:
         elif self.scheduler_type == 'step':
             self.scheduler = optim.lr_scheduler.StepLR(
                 optimiser,
-                step_size=config['step_size'],
-                gamma=config['gamma']
+                step_size=config.get('step_size', 30),
+                gamma=config.get('gamma', 0.1)
             )
         elif self.scheduler_type == 'exponential':
             self.scheduler = optim.lr_scheduler.ExponentialLR(
                 optimiser,
-                gamma=config['gamma']
+                gamma=config.get('gamma', 0.95)
             )
         elif self.scheduler_type == 'reduce_on_plateau':
             self.scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -276,7 +276,7 @@ def train_epoch(
         data, target = data.to(device), target.to(device)
         
         # Apply augmentation if provided
-        if augmentation_fn is not None:
+        if augmentation_fn is not None and hasattr(augmentation_fn, '__call__'):
             data, target, mixed_targets, lam = augmentation_fn(data, target)
         else:
             mixed_targets = None
@@ -293,17 +293,20 @@ def train_epoch(
         else:
             loss = criterion(outputs, target)
         
-        # Add regularisation if configured
-        if 'weight_decay' in config['training'] and config['training']['weight_decay'] > 0:
-            l2_reg = sum(p.pow(2).sum() for p in model.parameters())
-            loss += config['training']['weight_decay'] * l2_reg
+        # Check for NaN or Inf loss
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"Warning: Invalid loss detected: {loss.item()}")
+            continue
         
         # Backward pass
         loss.backward()
         
-        # Gradient clipping if configured
+        # Gradient clipping to prevent exploding gradients
         if 'gradient_clip' in config['training']:
             nn.utils.clip_grad_norm_(model.parameters(), config['training']['gradient_clip'])
+        else:
+            # Default gradient clipping
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         
         optimiser.step()
         
@@ -313,10 +316,7 @@ def train_epoch(
             probabilities = torch.softmax(outputs, dim=1)
             
             # For mixed augmentation, use original targets for metrics
-            if mixed_targets is not None:
-                tracker.update(predictions, target, probabilities, loss.item())
-            else:
-                tracker.update(predictions, target, probabilities, loss.item())
+            tracker.update(predictions, target, probabilities, loss.item())
         
         total_loss += loss.item()
         
@@ -404,11 +404,16 @@ def train_model(
     Returns:
         Trained model
     """
-    # Setup
+    # Ensure model is on correct device
+    model = model.to(device)
+    
+    # Setup criterion
     criterion = nn.CrossEntropyLoss()
+    
+    # Use Adam optimiser with lower learning rate for stability
     optimiser = optim.Adam(
         model.parameters(),
-        lr=config['training']['learning_rate'],
+        lr=config['training']['learning_rate'] * 0.1,  # Reduce learning rate for stability
         weight_decay=config['training']['weight_decay']
     )
     
@@ -433,7 +438,7 @@ def train_model(
         # Train
         train_metrics = train_epoch(
             model, train_loader, criterion, optimiser,
-            device, epoch, config, augmentation_fn
+            device, epoch + 1, config, augmentation_fn
         )
         
         # Validate

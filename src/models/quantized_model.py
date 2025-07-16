@@ -113,6 +113,9 @@ class QuantizedModel:
         # Make a copy to avoid modifying original
         model_copy = copy.deepcopy(model)
         
+        # Move to CPU for quantization
+        model_copy = model_copy.cpu()
+        
         # Skip quantization if no backend available
         if self.backend == 'none':
             warnings.warn("No quantization backend available, returning original model")
@@ -202,7 +205,7 @@ class QuantizedModel:
         Args:
             model: Prepared model
             calibration_loader: Data loader for calibration
-            device: Device to use
+            device: Device to use (will be moved to CPU for quantization)
         
         Returns:
             Calibrated model
@@ -210,15 +213,17 @@ class QuantizedModel:
         if self.quant_type != 'static' or self.backend == 'none':
             return model
         
+        # Ensure model is on CPU for calibration
         model.eval()
-        model.to(device)
+        model.cpu()
         
         print("Calibrating model for static quantization...")
         with torch.no_grad():
             for batch_idx, (data, _) in enumerate(tqdm(calibration_loader)):
                 if batch_idx >= self.quant_config['calibration_batches']:
                     break
-                data = data.to(device)
+                # Move data to CPU for calibration
+                data = data.cpu()
                 _ = model(data)
         
         return model
@@ -235,7 +240,7 @@ class QuantizedModel:
         Args:
             model: Model to quantize
             calibration_loader: Data loader for calibration (static quantization)
-            device: Device to use
+            device: Device to use (quantization happens on CPU)
         
         Returns:
             Quantized model
@@ -244,6 +249,9 @@ class QuantizedModel:
         if self.backend == 'none':
             warnings.warn("No quantization backend available, returning original model")
             return model
+        
+        # Move model to CPU for quantization
+        model = model.cpu()
         
         # Prepare model
         prepared_model = self.prepare_model(model)
@@ -293,9 +301,13 @@ class QuantizedModel:
         Returns:
             Evaluation results
         """
+        # Move models to CPU for fair comparison
+        original_model = original_model.cpu()
+        quantized_model = quantized_model.cpu()
+        
         results = {
-            'original': self._evaluate_model(original_model, test_loader, device),
-            'quantized': self._evaluate_model(quantized_model, test_loader, device)
+            'original': self._evaluate_model(original_model, test_loader, torch.device('cpu')),
+            'quantized': self._evaluate_model(quantized_model, test_loader, torch.device('cpu'))
         }
         
         # Calculate compression ratio
@@ -304,8 +316,8 @@ class QuantizedModel:
         results['compression_ratio'] = original_size / quantized_size if quantized_size > 0 else 1.0
         
         # Calculate speedup
-        original_time = self._measure_inference_time(original_model, test_loader, device)
-        quantized_time = self._measure_inference_time(quantized_model, test_loader, device)
+        original_time = self._measure_inference_time(original_model, test_loader, torch.device('cpu'))
+        quantized_time = self._measure_inference_time(quantized_model, test_loader, torch.device('cpu'))
         results['speedup'] = original_time / quantized_time if quantized_time > 0 else 1.0
         
         return results
@@ -374,15 +386,9 @@ class QuantizedModel:
                 _ = model(data)
         
         # Measure time
-        torch.cuda.synchronize() if device.type == 'cuda' else None
-        start_time = torch.cuda.Event(enable_timing=True) if device.type == 'cuda' else None
-        end_time = torch.cuda.Event(enable_timing=True) if device.type == 'cuda' else None
+        import time
         
-        if device.type == 'cuda':
-            start_time.record()
-        else:
-            import time
-            start_time = time.time()
+        start_time = time.time()
         
         with torch.no_grad():
             for i, (data, _) in enumerate(test_loader):
@@ -391,12 +397,7 @@ class QuantizedModel:
                 data = data.to(device)
                 _ = model(data)
         
-        if device.type == 'cuda':
-            end_time.record()
-            torch.cuda.synchronize()
-            elapsed_time = start_time.elapsed_time(end_time) / 1000  # Convert to seconds
-        else:
-            elapsed_time = time.time() - start_time
+        elapsed_time = time.time() - start_time
         
         return elapsed_time
 
@@ -427,18 +428,26 @@ def quantize_robust_model(
     
     quantizer = QuantizedModel(config)
     
+    # Move model to CPU for quantization
+    model_cpu = model.cpu()
+    
     # Quantize model
-    quantized_model = quantizer.quantize_model(model, calibration_loader, device)
+    quantized_model = quantizer.quantize_model(model_cpu, calibration_loader, device)
     
     # Evaluate if test loader provided
     if test_loader is not None and quantizer.backend != 'none':
         print("\nEvaluating quantized model...")
-        results = quantizer.evaluate_quantized_model(model, quantized_model, test_loader, device)
-        
-        print(f"\nOriginal Model Accuracy: {results['original']['accuracy']:.2f}%")
-        print(f"Quantized Model Accuracy: {results['quantized']['accuracy']:.2f}%")
-        print(f"Compression Ratio: {results['compression_ratio']:.2f}x")
-        print(f"Speedup: {results['speedup']:.2f}x")
+        try:
+            results = quantizer.evaluate_quantized_model(model_cpu, quantized_model, test_loader, torch.device('cpu'))
+            
+            print(f"\nOriginal Model Accuracy: {results['original']['accuracy']:.2f}%")
+            print(f"Quantized Model Accuracy: {results['quantized']['accuracy']:.2f}%")
+            print(f"Compression Ratio: {results['compression_ratio']:.2f}x")
+            print(f"Speedup: {results['speedup']:.2f}x")
+        except Exception as e:
+            print(f"\nWarning: Quantization evaluation failed: {e}")
+            print("Continuing with non-quantized model...")
+            quantized_model = model
     
     # Save quantized model
     if save_path is not None:
@@ -449,5 +458,9 @@ def quantize_robust_model(
             'backend': quantizer.backend
         }, save_path)
         print(f"\nSaved quantized model to {save_path}")
+    
+    # Move back to original device if needed
+    if device.type == 'cuda' and quantizer.backend == 'none':
+        quantized_model = quantized_model.to(device)
     
     return quantized_model

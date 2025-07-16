@@ -1,425 +1,466 @@
-# Adversarial training implementation for robust model training
+# Model quantization implementation for efficient inference
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
+import torch.quantization as quantization
 from torch.utils.data import DataLoader
-from typing import Dict, Any, Optional, Callable, Tuple
-import numpy as np
+from typing import Dict, Any, Optional, Union
+import copy
 from tqdm import tqdm
+import platform
+import warnings
 
-from ..attacks.fgsm import FGSMAttack
-from ..attacks.pgd import PGDAttack
 
-
-class AdversarialTrainer:
-    """Trainer for adversarial training of neural networks."""
+class QuantizedModel:
+    """Handler for model quantization."""
     
-    def __init__(
-        self,
-        model: nn.Module,
-        config: Dict[str, Any],
-        device: torch.device = torch.device('cpu')
-    ):
+    def __init__(self, config: Dict[str, Any]):
         """
-        Initialise adversarial trainer.
+        Initialise quantization handler.
         
         Args:
-            model: Model to train
             config: Configuration dictionary
-            device: Device to use for training
         """
-        self.model = model.to(device)
         self.config = config
-        self.device = device
+        self.quant_config = config['quantization']
+        self.quant_type = self.quant_config['type']
         
-        # Training parameters
-        self.epochs = config['training']['epochs']
-        self.lr = config['training']['learning_rate']
-        self.weight_decay = config['training']['weight_decay']
+        # Auto-detect the best backend for the current platform
+        self.backend = self._detect_backend()
         
-        # Adversarial parameters
-        self.adv_config = config['adversarial']
-        self.attack_ratio = self.adv_config['training']['attack_ratio']
-        self.epsilon_schedule = self.adv_config['training']['epsilon_schedule']
-        self.max_epsilon = self.adv_config['training']['max_epsilon']
-        
-        # Initialise optimiser
-        self.optimiser = optim.Adam(
-            self.model.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay
-        )
-        
-        # Initialise scheduler
-        self._init_scheduler()
-        
-        # Initialise attacks
-        self._init_attacks()
-        
-        # Training history
-        self.history = {
-            'train_loss': [],
-            'train_acc': [],
-            'val_loss': [],
-            'val_acc': [],
-            'val_robust_acc': []
-        }
+        # Set quantization backend
+        try:
+            torch.backends.quantized.engine = self.backend
+            print(f"Using quantization backend: {self.backend}")
+        except RuntimeError as e:
+            warnings.warn(f"Failed to set backend {self.backend}: {e}")
+            # Try fallback
+            self.backend = self._get_fallback_backend()
+            torch.backends.quantized.engine = self.backend
+            print(f"Using fallback backend: {self.backend}")
     
-    def _init_scheduler(self):
-        """Initialise learning rate scheduler."""
-        scheduler_config = self.config['training']['scheduler']
+    def _detect_backend(self) -> str:
+        """Automatically detect the best quantization backend for the current platform."""
+        # Check if we're on Windows or Linux x86_64
+        system = platform.system()
+        machine = platform.machine().lower()
         
-        if scheduler_config['type'] == 'cosine':
-            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                self.optimiser,
-                T_max=self.epochs
-            )
-        elif scheduler_config['type'] == 'step':
-            self.scheduler = optim.lr_scheduler.StepLR(
-                self.optimiser,
-                step_size=scheduler_config['step_size'],
-                gamma=scheduler_config['gamma']
-            )
-        elif scheduler_config['type'] == 'exponential':
-            self.scheduler = optim.lr_scheduler.ExponentialLR(
-                self.optimiser,
-                gamma=scheduler_config['gamma']
-            )
-        else:
-            self.scheduler = None
-    
-    def _init_attacks(self):
-        """Initialise adversarial attacks."""
-        fgsm_config = self.adv_config['attacks']['fgsm']
-        pgd_config = self.adv_config['attacks']['pgd']
+        # Override with config if explicitly set and valid
+        config_backend = self.quant_config.get('backend', '').lower()
         
-        self.fgsm = FGSMAttack(
-            epsilon=fgsm_config['epsilon'],
-            targeted=fgsm_config['targeted']
-        )
+        # Check available backends
+        available_backends = []
+        try:
+            torch.backends.quantized.engine = 'fbgemm'
+            available_backends.append('fbgemm')
+        except:
+            pass
         
-        self.pgd = PGDAttack(
-            epsilon=pgd_config['epsilon'],
-            alpha=pgd_config['alpha'],
-            num_steps=pgd_config['num_steps'],
-            random_start=pgd_config['random_start']
-        )
-    
-    def get_epsilon(self, epoch: int) -> float:
-        """
-        Get epsilon value for current epoch based on schedule.
+        try:
+            torch.backends.quantized.engine = 'qnnpack'
+            available_backends.append('qnnpack')
+        except:
+            pass
         
-        Args:
-            epoch: Current epoch
-        
-        Returns:
-            Epsilon value
-        """
-        if self.epsilon_schedule == 'constant':
-            return self.max_epsilon
-        elif self.epsilon_schedule == 'linear':
-            return self.max_epsilon * (epoch + 1) / self.epochs
-        elif self.epsilon_schedule == 'exponential':
-            return self.max_epsilon * (1 - np.exp(-5 * epoch / self.epochs))
-        else:
-            return self.max_epsilon
-    
-    def train_epoch(
-        self,
-        train_loader: DataLoader,
-        epoch: int,
-        criterion: nn.Module = nn.CrossEntropyLoss()
-    ) -> Tuple[float, float]:
-        """
-        Train for one epoch with adversarial training.
-        
-        Args:
-            train_loader: Training data loader
-            epoch: Current epoch
-            criterion: Loss function
-        
-        Returns:
-            Tuple of (average loss, accuracy)
-        """
-        self.model.train()
-        
-        total_loss = 0
-        correct = 0
-        total = 0
-        
-        # Update epsilon for current epoch
-        current_epsilon = self.get_epsilon(epoch)
-        self.fgsm.epsilon = current_epsilon
-        self.pgd.epsilon = current_epsilon
-        
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{self.epochs}')
-        
-        for batch_idx, (data, target) in enumerate(progress_bar):
-            data, target = data.to(self.device), target.to(self.device)
-            batch_size = data.size(0)
-            
-            # Determine split for clean and adversarial examples
-            adv_size = int(batch_size * self.attack_ratio)
-            clean_size = batch_size - adv_size
-            
-            if adv_size > 0:
-                # Split batch
-                clean_data = data[:clean_size]
-                clean_target = target[:clean_size]
-                adv_data = data[clean_size:]
-                adv_target = target[clean_size:]
-                
-                # Generate adversarial examples
-                if np.random.rand() > 0.5:
-                    # Use FGSM
-                    adv_examples = self.fgsm.generate(self.model, adv_data, adv_target)
-                else:
-                    # Use PGD
-                    adv_examples = self.pgd.generate(self.model, adv_data, adv_target)
-                
-                # Combine clean and adversarial examples
-                combined_data = torch.cat([clean_data, adv_examples])
-                combined_target = torch.cat([clean_target, adv_target])
+        # Auto-detect based on platform
+        if system == 'Windows' or (system == 'Linux' and 'x86' in machine):
+            # x86/x64 platforms - use FBGEMM
+            if 'fbgemm' in available_backends:
+                return 'fbgemm'
             else:
-                combined_data = data
-                combined_target = target
-            
-            # Forward pass
-            self.optimiser.zero_grad()
-            outputs = self.model(combined_data)
-            loss = criterion(outputs, combined_target)
-            
-            # Backward pass
-            loss.backward()
-            self.optimiser.step()
-            
-            # Statistics
-            total_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += combined_target.size(0)
-            correct += predicted.eq(combined_target).sum().item()
-            
-            # Update progress bar
-            progress_bar.set_postfix({
-                'Loss': f'{loss.item():.4f}',
-                'Acc': f'{100.*correct/total:.2f}%',
-                'Eps': f'{current_epsilon:.3f}'
-            })
+                warnings.warn("FBGEMM not available on x86 platform")
+        elif 'arm' in machine or 'aarch' in machine:
+            # ARM platforms - prefer QNNPACK
+            if 'qnnpack' in available_backends:
+                return 'qnnpack'
+            elif 'fbgemm' in available_backends:
+                return 'fbgemm'
         
-        avg_loss = total_loss / len(train_loader)
-        accuracy = 100. * correct / total
+        # If config specifies a backend and it's available, use it
+        if config_backend in available_backends:
+            return config_backend
         
-        return avg_loss, accuracy
+        # Default fallback
+        if available_backends:
+            return available_backends[0]
+        
+        # Last resort - no quantization
+        warnings.warn("No quantization backend available, using default (no quantization)")
+        return 'none'
     
-    def evaluate(
-        self,
-        val_loader: DataLoader,
-        criterion: nn.Module = nn.CrossEntropyLoss(),
-        attack: Optional[str] = None
-    ) -> Tuple[float, float]:
-        """Evaluate model on validation set."""
-        self.model.eval()
-        
-        total_loss = 0
-        correct = 0
-        total = 0
-        
-        for data, target in val_loader:
-            data, target = data.to(self.device), target.to(self.device)
-            
-            if attack == 'fgsm':
-                # Generate adversarial examples
-                data = self.fgsm.generate(self.model, data, target)
-            elif attack == 'pgd':
-                # Generate adversarial examples
-                data = self.pgd.generate(self.model, data, target)
-            
-            # Evaluate
-            with torch.no_grad():
-                outputs = self.model(data)
-                loss = criterion(outputs, target)
-                
-                total_loss += loss.item()
-                _, predicted = outputs.max(1)
-                total += target.size(0)
-                correct += predicted.eq(target).sum().item()
-        
-        avg_loss = total_loss / len(val_loader)
-        accuracy = 100. * correct / total
-        
-        return avg_loss, accuracy
+    def _get_fallback_backend(self) -> str:
+        """Get a fallback backend if the primary one fails."""
+        try:
+            torch.backends.quantized.engine = 'fbgemm'
+            return 'fbgemm'
+        except:
+            try:
+                torch.backends.quantized.engine = 'qnnpack'
+                return 'qnnpack'
+            except:
+                return 'none'
     
-    def train(
-        self,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        save_path: Optional[str] = None
-    ):
+    def prepare_model(self, model: nn.Module) -> nn.Module:
         """
-        Train model with adversarial training.
+        Prepare model for quantization.
         
         Args:
-            train_loader: Training data loader
-            val_loader: Validation data loader
-            save_path: Path to save best model
-        """
-        best_robust_acc = 0
+            model: Model to prepare
         
-        for epoch in range(self.epochs):
-            # Training
-            train_loss, train_acc = self.train_epoch(train_loader, epoch)
-            
-            # Evaluation
-            val_loss, val_acc = self.evaluate(val_loader)
-            val_robust_loss, val_robust_acc = self.evaluate(val_loader, attack='pgd')
-            
-            # Update scheduler
-            if self.scheduler:
-                self.scheduler.step()
-            
-            # Save history
-            self.history['train_loss'].append(train_loss)
-            self.history['train_acc'].append(train_acc)
-            self.history['val_loss'].append(val_loss)
-            self.history['val_acc'].append(val_acc)
-            self.history['val_robust_acc'].append(val_robust_acc)
-            
-            # Print epoch summary
-            print(f"\nEpoch {epoch+1}/{self.epochs}")
-            print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-            print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%")
-            print(f"Robust Acc (PGD): {val_robust_acc:.2f}%")
-            
-            # Save best model
-            if save_path and val_robust_acc > best_robust_acc:
-                best_robust_acc = val_robust_acc
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': self.model.state_dict(),
-                    'optimiser_state_dict': self.optimiser.state_dict(),
-                    'best_robust_acc': best_robust_acc,
-                    'history': self.history,
-                    'config': self.config
-                }, save_path)
-                print(f"Saved best model with robust accuracy: {best_robust_acc:.2f}%")
-
-
-class FreeAdversarialTraining(AdversarialTrainer):
-    """Fast adversarial training using free adversarial training method."""
+        Returns:
+            Prepared model
+        """
+        # Make a copy to avoid modifying original
+        model_copy = copy.deepcopy(model)
+        
+        # Move to CPU for quantization
+        model_copy = model_copy.cpu()
+        
+        # Skip quantization if no backend available
+        if self.backend == 'none':
+            warnings.warn("No quantization backend available, returning original model")
+            return model_copy
+        
+        # Fuse modules for better quantization
+        model_copy = self._fuse_modules(model_copy)
+        
+        if self.quant_type == 'dynamic':
+            # Dynamic quantization doesn't need preparation
+            return model_copy
+        elif self.quant_type == 'static':
+            # Prepare for static quantization
+            model_copy.qconfig = quantization.get_default_qconfig(self.backend)
+            quantization.prepare(model_copy, inplace=True)
+            return model_copy
+        else:
+            raise ValueError(f"Unknown quantization type: {self.quant_type}")
     
-    def __init__(
+    def _fuse_modules(self, model: nn.Module) -> nn.Module:
+        """
+        Fuse conv-bn-relu modules for efficient quantization.
+        
+        Args:
+            model: Model to fuse
+        
+        Returns:
+            Fused model
+        """
+        # Skip fusion if no quantization backend
+        if self.backend == 'none':
+            return model
+        
+        # This is architecture-specific
+        # Example for ResNet
+        if hasattr(model, 'backbone') and 'resnet' in self.config['model']['architecture']:
+            modules_to_fuse = []
+            
+            # Fuse conv-bn-relu in ResNet blocks
+            for name, module in model.backbone.named_modules():
+                if isinstance(module, nn.Conv2d):
+                    # Check if followed by BatchNorm
+                    parts = name.split('.')
+                    if len(parts) > 0:
+                        parent_name = '.'.join(parts[:-1])
+                        conv_name = parts[-1]
+                        
+                        try:
+                            parent = model.backbone
+                            for part in parts[:-1]:
+                                parent = getattr(parent, part)
+                            
+                            # Check for bn and relu
+                            if hasattr(parent, f'bn{conv_name[-1]}'):
+                                bn_name = f'bn{conv_name[-1]}'
+                                if hasattr(parent, 'relu'):
+                                    modules_to_fuse.append([
+                                        f'{parent_name}.{conv_name}',
+                                        f'{parent_name}.{bn_name}',
+                                        f'{parent_name}.relu'
+                                    ])
+                                else:
+                                    modules_to_fuse.append([
+                                        f'{parent_name}.{conv_name}',
+                                        f'{parent_name}.{bn_name}'
+                                    ])
+                        except:
+                            continue
+            
+            if modules_to_fuse:
+                try:
+                    model = quantization.fuse_modules(model, modules_to_fuse)
+                except Exception as e:
+                    warnings.warn(f"Module fusion failed: {e}")
+        
+        return model
+    
+    def calibrate_model(
         self,
         model: nn.Module,
-        config: Dict[str, Any],
-        device: torch.device = torch.device('cpu'),
-        replay_m: int = 4
-    ):
+        calibration_loader: DataLoader,
+        device: torch.device = torch.device('cpu')
+    ) -> nn.Module:
         """
-        Initialise free adversarial training.
+        Calibrate model for static quantization.
         
         Args:
-            model: Model to train
-            config: Configuration dictionary
-            device: Device to use
-            replay_m: Number of replay iterations
-        """
-        super().__init__(model, config, device)
-        self.replay_m = replay_m
-    
-    def train_epoch(
-        self,
-        train_loader: DataLoader,
-        epoch: int,
-        criterion: nn.Module = nn.CrossEntropyLoss()
-    ) -> Tuple[float, float]:
-        """Train for one epoch using free adversarial training."""
-        self.model.train()
+            model: Prepared model
+            calibration_loader: Data loader for calibration
+            device: Device to use (will be moved to CPU for quantization)
         
-        total_loss = 0
+        Returns:
+            Calibrated model
+        """
+        if self.quant_type != 'static' or self.backend == 'none':
+            return model
+        
+        # Ensure model is on CPU for calibration
+        model.eval()
+        model.cpu()
+        
+        print("Calibrating model for static quantization...")
+        with torch.no_grad():
+            for batch_idx, (data, _) in enumerate(tqdm(calibration_loader)):
+                if batch_idx >= self.quant_config['calibration_batches']:
+                    break
+                # Move data to CPU for calibration
+                data = data.cpu()
+                _ = model(data)
+        
+        return model
+    
+    def quantize_model(
+        self,
+        model: nn.Module,
+        calibration_loader: Optional[DataLoader] = None,
+        device: torch.device = torch.device('cpu')
+    ) -> nn.Module:
+        """
+        Quantize model.
+        
+        Args:
+            model: Model to quantize
+            calibration_loader: Data loader for calibration (static quantization)
+            device: Device to use (quantization happens on CPU)
+        
+        Returns:
+            Quantized model
+        """
+        # Skip if no backend available
+        if self.backend == 'none':
+            warnings.warn("No quantization backend available, returning original model")
+            return model
+        
+        # Move model to CPU for quantization
+        model = model.cpu()
+        
+        # Prepare model
+        prepared_model = self.prepare_model(model)
+        
+        try:
+            if self.quant_type == 'dynamic':
+                # Apply dynamic quantization
+                quantized_model = quantization.quantize_dynamic(
+                    prepared_model,
+                    qconfig_spec={nn.Linear, nn.Conv2d},
+                    dtype=torch.qint8
+                )
+            elif self.quant_type == 'static':
+                if calibration_loader is None:
+                    raise ValueError("Calibration loader required for static quantization")
+                
+                # Calibrate model
+                prepared_model = self.calibrate_model(prepared_model, calibration_loader, device)
+                
+                # Convert to quantized model
+                quantized_model = quantization.convert(prepared_model)
+            else:
+                raise ValueError(f"Unknown quantization type: {self.quant_type}")
+            
+            return quantized_model
+            
+        except Exception as e:
+            warnings.warn(f"Quantization failed: {e}. Returning original model.")
+            return model
+    
+    def evaluate_quantized_model(
+        self,
+        original_model: nn.Module,
+        quantized_model: nn.Module,
+        test_loader: DataLoader,
+        device: torch.device = torch.device('cpu')
+    ) -> Dict[str, Any]:
+        """
+        Evaluate quantized model and compare with original.
+        
+        Args:
+            original_model: Original model
+            quantized_model: Quantized model
+            test_loader: Test data loader
+            device: Device to use
+        
+        Returns:
+            Evaluation results
+        """
+        # Move models to CPU for fair comparison
+        original_model = original_model.cpu()
+        quantized_model = quantized_model.cpu()
+        
+        results = {
+            'original': self._evaluate_model(original_model, test_loader, torch.device('cpu')),
+            'quantized': self._evaluate_model(quantized_model, test_loader, torch.device('cpu'))
+        }
+        
+        # Calculate compression ratio
+        original_size = self._get_model_size(original_model)
+        quantized_size = self._get_model_size(quantized_model)
+        results['compression_ratio'] = original_size / quantized_size if quantized_size > 0 else 1.0
+        
+        # Calculate speedup
+        original_time = self._measure_inference_time(original_model, test_loader, torch.device('cpu'))
+        quantized_time = self._measure_inference_time(quantized_model, test_loader, torch.device('cpu'))
+        results['speedup'] = original_time / quantized_time if quantized_time > 0 else 1.0
+        
+        return results
+    
+    def _evaluate_model(
+        self,
+        model: nn.Module,
+        test_loader: DataLoader,
+        device: torch.device
+    ) -> Dict[str, float]:
+        """Evaluate model accuracy."""
+        model.eval()
+        model.to(device)
+        
         correct = 0
         total = 0
         
-        current_epsilon = self.get_epsilon(epoch)
+        # Limit evaluation to speed things up during development
+        max_batches = 50  # Evaluate on subset for faster development
         
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{self.epochs}')
-        
-        for batch_idx, (data, target) in enumerate(progress_bar):
-            data, target = data.to(self.device), target.to(self.device)
-            
-            # Initialise perturbation
-            delta = torch.zeros_like(data, requires_grad=True)
-            
-            for _ in range(self.replay_m):
-                # Forward pass with perturbation
-                outputs = self.model(data + delta)
-                loss = criterion(outputs, target)
-                
-                # Backward pass
-                self.optimiser.zero_grad()
-                loss.backward()
-                
-                # Update model
-                self.optimiser.step()
-                
-                # Update perturbation
-                grad = delta.grad.detach()
-                delta.data = torch.clamp(
-                    delta + current_epsilon * grad.sign(),
-                    -current_epsilon,
-                    current_epsilon
-                )
-                delta.grad.zero_()
-            
-            # Statistics (on clean examples for consistency)
-            with torch.no_grad():
-                outputs = self.model(data)
+        with torch.no_grad():
+            for batch_idx, (data, target) in enumerate(test_loader):
+                if batch_idx >= max_batches:
+                    break
+                    
+                data, target = data.to(device), target.to(device)
+                outputs = model(data)
                 _, predicted = outputs.max(1)
                 total += target.size(0)
                 correct += predicted.eq(target).sum().item()
-                total_loss += loss.item()
-            
-            progress_bar.set_postfix({
-                'Loss': f'{loss.item():.4f}',
-                'Acc': f'{100.*correct/total:.2f}%',
-                'Eps': f'{current_epsilon:.3f}'
-            })
         
-        avg_loss = total_loss / len(train_loader)
         accuracy = 100. * correct / total
+        return {'accuracy': accuracy}
+    
+    def _get_model_size(self, model: nn.Module) -> float:
+        """Get model size in MB."""
+        param_size = 0
+        buffer_size = 0
         
-        return avg_loss, accuracy
+        for param in model.parameters():
+            param_size += param.nelement() * param.element_size()
+        
+        for buffer in model.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
+        
+        size_mb = (param_size + buffer_size) / 1024 / 1024
+        return size_mb
+    
+    def _measure_inference_time(
+        self,
+        model: nn.Module,
+        test_loader: DataLoader,
+        device: torch.device,
+        num_batches: int = 10  # Reduced for faster development
+    ) -> float:
+        """Measure average inference time."""
+        model.eval()
+        model.to(device)
+        
+        # Warm up
+        for i, (data, _) in enumerate(test_loader):
+            if i >= 5:  # Reduced warmup
+                break
+            data = data.to(device)
+            with torch.no_grad():
+                _ = model(data)
+        
+        # Measure time
+        import time
+        
+        start_time = time.time()
+        
+        with torch.no_grad():
+            for i, (data, _) in enumerate(test_loader):
+                if i >= num_batches:
+                    break
+                data = data.to(device)
+                _ = model(data)
+        
+        elapsed_time = time.time() - start_time
+        
+        return elapsed_time
 
 
-def create_robust_model(
-    base_model: nn.Module,
+def quantize_robust_model(
+    model: nn.Module,
     config: Dict[str, Any],
-    train_loader: DataLoader,
-    val_loader: DataLoader,
+    calibration_loader: Optional[DataLoader] = None,
+    test_loader: Optional[DataLoader] = None,
     device: torch.device = torch.device('cpu'),
-    save_path: Optional[str] = None,
-    use_free_training: bool = False
+    save_path: Optional[str] = None
 ) -> nn.Module:
     """
-    Create adversarially robust model through adversarial training.
+    Quantize a robust model.
     
     Args:
-        base_model: Base model architecture
+        model: Model to quantize
         config: Configuration dictionary
-        train_loader: Training data loader
-        val_loader: Validation data loader
+        calibration_loader: Data loader for calibration
+        test_loader: Test data loader for evaluation
         device: Device to use
-        save_path: Path to save trained model
-        use_free_training: Whether to use free adversarial training
+        save_path: Path to save quantized model
     
     Returns:
-        Trained robust model
+        Quantized model
     """
-    if use_free_training:
-        trainer = FreeAdversarialTraining(base_model, config, device)
-    else:
-        trainer = AdversarialTrainer(base_model, config, device)
+    print(f"\nQuantizing model on {platform.system()} {platform.machine()}...")
     
-    trainer.train(train_loader, val_loader, save_path)
+    quantizer = QuantizedModel(config)
     
-    return trainer.model
+    # Move model to CPU for quantization
+    model_cpu = model.cpu()
+    
+    # Quantize model
+    quantized_model = quantizer.quantize_model(model_cpu, calibration_loader, device)
+    
+    # Evaluate if test loader provided
+    if test_loader is not None and quantizer.backend != 'none':
+        print("\nEvaluating quantized model...")
+        try:
+            results = quantizer.evaluate_quantized_model(model_cpu, quantized_model, test_loader, torch.device('cpu'))
+            
+            print(f"\nOriginal Model Accuracy: {results['original']['accuracy']:.2f}%")
+            print(f"Quantized Model Accuracy: {results['quantized']['accuracy']:.2f}%")
+            print(f"Compression Ratio: {results['compression_ratio']:.2f}x")
+            print(f"Speedup: {results['speedup']:.2f}x")
+        except Exception as e:
+            print(f"\nWarning: Quantization evaluation failed: {e}")
+            print("Continuing with non-quantized model...")
+            quantized_model = model
+    
+    # Save quantized model
+    if save_path is not None:
+        torch.save({
+            'model_state_dict': quantized_model.state_dict(),
+            'config': config,
+            'quantization_type': config['quantization']['type'],
+            'backend': quantizer.backend
+        }, save_path)
+        print(f"\nSaved quantized model to {save_path}")
+    
+    # Move back to original device if needed
+    if device.type == 'cuda' and quantizer.backend == 'none':
+        quantized_model = quantized_model.to(device)
+    
+    return quantized_model

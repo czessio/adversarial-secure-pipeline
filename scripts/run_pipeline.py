@@ -19,7 +19,9 @@ from src.preprocessing.lighting_correction import create_lighting_corrected_tran
 from src.preprocessing.data_augmentation import AugmentationWrapper
 from src.models.base_classifier import create_model
 from src.models.robust_classifier import create_robust_model_architecture
-from src.defences.adversarial_training import AdversarialTrainer
+
+
+
 from src.models.quantized_model import quantize_robust_model
 from src.attacks.fgsm import FGSMAttack
 from src.attacks.pgd import PGDAttack
@@ -28,7 +30,6 @@ from src.analysis.enhanced_visualisation import generate_final_report
 from src.privacy.homomorphic_encryption import demonstrate_private_inference
 from src.utils.metrics import RobustnessEvaluator, calculate_efficiency_metrics
 from src.utils.training_utils import train_model
-
 
 
 class PipelineCheckpoint:
@@ -57,7 +58,7 @@ class PipelineCheckpoint:
         with open(stage_file, 'wb') as f:
             pickle.dump(data, f)
         
-        print(f"✓ Checkpoint saved for stage: {stage}")
+        print(f"Checkpoint saved for stage: {stage}")
     
     def load(self, stage: str) -> dict:
         """Load checkpoint for a specific stage."""
@@ -103,13 +104,17 @@ class AdversarialRobustnessPipeline:
         self.config = load_config(config_path)
         self.experiment_name = experiment_name
         self.dev_mode = dev_mode
-        self.device = torch.device(
-            self.config['hardware']['device'] if torch.cuda.is_available() else 'cpu'
-        )
+        
+        # Ensure CUDA availability is properly checked
+        if self.config['hardware']['device'] == 'cuda' and not torch.cuda.is_available():
+            print("Warning: CUDA requested but not available, using CPU")
+            self.config['hardware']['device'] = 'cpu'
+        
+        self.device = torch.device(self.config['hardware']['device'])
         
         # Adjust config for dev mode
         if self.dev_mode:
-            print("\n DEVELOPMENT MODE ENABLED - Using reduced settings for faster iteration")
+            print("\nDEVELOPMENT MODE ENABLED - Using reduced settings for faster iteration")
             self.config['training']['epochs'] = min(2, self.config['training']['epochs'])
             self.config['adversarial']['attacks']['pgd']['num_steps'] = 5
             self.config['quantization']['calibration_batches'] = 10
@@ -142,7 +147,7 @@ class AdversarialRobustnessPipeline:
         """Prepare data loaders with preprocessing."""
         # Check if we can skip this stage
         if self.checkpoint.can_skip_stage('data_preparation'):
-            print("\n✓ Skipping data preparation (checkpoint found)")
+            print("\nSkipping data preparation (checkpoint found)")
             checkpoint_data = self.checkpoint.load('data_preparation')
             if checkpoint_data:
                 # Note: DataLoaders can't be pickled, so we'll recreate them
@@ -198,7 +203,7 @@ class AdversarialRobustnessPipeline:
         # Check for existing checkpoint
         model_path = self.experiment_dir / 'base_model.pth'
         if model_path.exists() and self.checkpoint.can_skip_stage('base_training'):
-            print("\n✓ Loading base model from checkpoint")
+            print("\nLoading base model from checkpoint")
             self.model = create_model(self.config)
             checkpoint = torch.load(model_path, map_location=self.device)
             self.model.load_state_dict(checkpoint['model_state_dict'])
@@ -209,10 +214,13 @@ class AdversarialRobustnessPipeline:
         print("BASE MODEL TRAINING")
         print("="*50)
         
-        # Create model
+        # Create model and ensure it's on the correct device
         self.model = create_model(self.config)
+        self.model = self.model.to(self.device)
+        
         print(f"Architecture: {self.config['model']['architecture']}")
         print(f"Parameters: {self.model.get_num_parameters():,}")
+        print(f"Device: {next(self.model.parameters()).device}")
         
         # Create augmentation wrapper
         augmentation = AugmentationWrapper(
@@ -252,7 +260,7 @@ class AdversarialRobustnessPipeline:
         # Check for existing checkpoint
         robust_path = self.experiment_dir / 'robust_model.pth'
         if robust_path.exists() and self.checkpoint.can_skip_stage('adversarial_training'):
-            print("\n✓ Loading robust model from checkpoint")
+            print("\nLoading robust model from checkpoint")
             if self.model is None:
                 self.model = create_model(self.config)
             self.robust_model = self.model
@@ -275,6 +283,9 @@ class AdversarialRobustnessPipeline:
                 self.config, model_type='adversarial'
             )
         
+        # Ensure model is on correct device
+        self.robust_model = self.robust_model.to(self.device)
+        
         # Adversarial trainer
         trainer = AdversarialTrainer(
             self.robust_model,
@@ -286,6 +297,7 @@ class AdversarialRobustnessPipeline:
         print(f"  - Attack ratio: {self.config['adversarial']['training']['attack_ratio']}")
         print(f"  - Max epsilon: {self.config['adversarial']['training']['max_epsilon']}")
         print(f"  - Epsilon schedule: {self.config['adversarial']['training']['epsilon_schedule']}")
+        print(f"  - Device: {next(self.robust_model.parameters()).device}")
         if self.dev_mode:
             print(f"  - DEV MODE: Reduced epochs and attack steps")
         
@@ -309,7 +321,7 @@ class AdversarialRobustnessPipeline:
         # Check for existing checkpoint
         quantized_path = self.experiment_dir / 'quantized_model.pth'
         if quantized_path.exists() and self.checkpoint.can_skip_stage('quantization'):
-            print("\n✓ Skipping quantization (checkpoint found)")
+            print("\nSkipping quantization (checkpoint found)")
             # Still need to load for later stages
             if self.robust_model is None:
                 self.robust_model = create_model(self.config)
@@ -353,7 +365,7 @@ class AdversarialRobustnessPipeline:
             })
             
         except Exception as e:
-            print(f"\n⚠️  Quantization failed: {e}")
+            print(f"\nQuantization failed: {e}")
             print("Continuing with non-quantized model...")
             self.quantized_model = self.robust_model
             # Still save checkpoint to mark stage as complete
@@ -366,7 +378,7 @@ class AdversarialRobustnessPipeline:
         """Comprehensive robustness evaluation."""
         # Check if we can skip or load cached results
         if self.checkpoint.can_skip_stage('robustness_evaluation') and not self.dev_mode:
-            print("\n✓ Loading robustness evaluation from checkpoint")
+            print("\nLoading robustness evaluation from checkpoint")
             checkpoint_data = self.checkpoint.load('robustness_evaluation')
             if checkpoint_data and 'results' in checkpoint_data:
                 return checkpoint_data['results']
@@ -377,12 +389,20 @@ class AdversarialRobustnessPipeline:
         
         models_to_evaluate = []
         
+        # Ensure models are on correct device
         if self.model is not None:
+            self.model = self.model.to(self.device)
             models_to_evaluate.append(('Base Model', self.model))
         if self.robust_model is not None:
+            self.robust_model = self.robust_model.to(self.device)
             models_to_evaluate.append(('Robust Model', self.robust_model))
         if self.quantized_model is not None and self.quantized_model != self.robust_model:
-            models_to_evaluate.append(('Quantized Model', self.quantized_model))
+            # Keep quantized model on CPU if it's quantized
+            if hasattr(self.quantized_model, 'qconfig'):
+                models_to_evaluate.append(('Quantized Model', self.quantized_model))
+            else:
+                self.quantized_model = self.quantized_model.to(self.device)
+                models_to_evaluate.append(('Quantized Model', self.quantized_model))
         
         # Create attacks (with reduced parameters in dev mode)
         if self.dev_mode:
@@ -462,7 +482,7 @@ class AdversarialRobustnessPipeline:
         """Perform bias analysis."""
         # Check for checkpoint
         if self.checkpoint.can_skip_stage('bias_analysis') and not self.dev_mode:
-            print("\n✓ Loading bias analysis from checkpoint")
+            print("\nLoading bias analysis from checkpoint")
             checkpoint_data = self.checkpoint.load('bias_analysis')
             if checkpoint_data and 'bias_report' in checkpoint_data:
                 return checkpoint_data['bias_report']
@@ -474,6 +494,9 @@ class AdversarialRobustnessPipeline:
         if self.robust_model is None:
             print("No model available for bias analysis!")
             return None
+        
+        # Ensure model is on correct device
+        self.robust_model = self.robust_model.to(self.device)
         
         # Get class names
         class_names = get_class_names(self.config['data']['dataset_name'])
@@ -538,7 +561,7 @@ class AdversarialRobustnessPipeline:
         """Test homomorphic encryption for privacy-preserving inference."""
         # Skip in dev mode by default
         if self.dev_mode:
-            print("\n⚡ Skipping privacy testing in dev mode")
+            print("\nSkipping privacy testing in dev mode")
             return
         
         print("\n" + "="*50)
@@ -606,13 +629,22 @@ class AdversarialRobustnessPipeline:
         for model_name, model in models_to_analyse:
             print(f"\nAnalysing {model_name}...")
             
+            # Determine device for model
+            if hasattr(model, 'qconfig') or 'Quantized' in model_name:
+                # Quantized models should be evaluated on CPU
+                eval_device = torch.device('cpu')
+                model = model.cpu()
+            else:
+                eval_device = self.device
+                model = model.to(eval_device)
+            
             # Reduce runs in dev mode
             num_runs = 10 if self.dev_mode else 100
             
             metrics = calculate_efficiency_metrics(
                 model,
                 (1, *input_shape),
-                self.device,
+                eval_device,
                 num_runs=num_runs
             )
             
@@ -640,8 +672,6 @@ class AdversarialRobustnessPipeline:
         print("="*50)
         
         from src.analysis.enhanced_visualisation import create_model_report
-
-
         
         # Prepare evaluation summary
         eval_summary = {}
@@ -692,11 +722,11 @@ class AdversarialRobustnessPipeline:
         print(f"Experiment: {self.experiment_name}")
         print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         if self.dev_mode:
-            print("🚀 Running in DEVELOPMENT MODE")
+            print("Running in DEVELOPMENT MODE")
         if resume:
             last_stage = self.checkpoint.get_last_stage()
             if last_stage:
-                print(f"📌 Resuming from checkpoint (last stage: {last_stage})")
+                print(f"Resuming from checkpoint (last stage: {last_stage})")
         
         # Track which stages to run
         stages = [
@@ -724,7 +754,7 @@ class AdversarialRobustnessPipeline:
                     stage_fn()
                     
             except Exception as e:
-                print(f"\n❌ Error in stage '{stage_name}': {str(e)}")
+                print(f"\nError in stage '{stage_name}': {str(e)}")
                 print(f"Traceback:\n{traceback.format_exc()}")
                 
                 # Ask user if they want to continue
@@ -740,7 +770,7 @@ class AdversarialRobustnessPipeline:
         try:
             self.generate_report(evaluation_results, bias_report)
         except Exception as e:
-            print(f"\n❌ Error generating report: {str(e)}")
+            print(f"\nError generating report: {str(e)}")
         
         # Pipeline summary
         total_time = time.time() - start_time

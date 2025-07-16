@@ -60,11 +60,23 @@ class RetinexCorrection:
             # Apply Gaussian blur to estimate illumination
             illumination = cv2.GaussianBlur(channel, (0, 0), self.sigma)
             
-            # Compute reflectance (avoid log of zero)
-            reflectance = np.log10(channel + 1e-6) - np.log10(illumination + 1e-6)
+            # Ensure minimum values to avoid log of zero
+            channel_safe = np.maximum(channel, 1e-6)
+            illumination_safe = np.maximum(illumination, 1e-6)
+            
+            # Compute reflectance safely
+            with np.errstate(invalid='ignore', divide='ignore'):
+                reflectance = np.log10(channel_safe) - np.log10(illumination_safe)
+            
+            # Handle any remaining NaN or Inf values
+            reflectance = np.nan_to_num(reflectance, nan=0.0, posinf=1.0, neginf=0.0)
             
             # Normalise to [0, 1]
-            reflectance = (reflectance - reflectance.min()) / (reflectance.max() - reflectance.min() + 1e-6)
+            if reflectance.max() > reflectance.min():
+                reflectance = (reflectance - reflectance.min()) / (reflectance.max() - reflectance.min())
+            else:
+                reflectance = np.zeros_like(reflectance)
+            
             corrected[:, :, i] = reflectance
         
         if is_tensor:
@@ -114,19 +126,28 @@ class AdaptiveHistogramEqualisation:
             else:
                 image_np = image.copy()
         
+        # Ensure valid range
+        image_np = np.clip(image_np, 0, 1) if image_np.max() <= 1 else np.clip(image_np, 0, 255)
+        
         # Convert to uint8 for CLAHE
         if image_np.dtype == np.float32 or image_np.dtype == np.float64:
-            image_np = (image_np * 255).astype(np.uint8)
+            image_np = (image_np * 255).astype(np.uint8) if image_np.max() <= 1 else image_np.astype(np.uint8)
         
-        # Convert to LAB colour space
-        lab = cv2.cvtColor(image_np, cv2.COLOR_RGB2LAB)
-        
-        # Apply CLAHE to L channel
-        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
-        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-        
-        # Convert back to RGB
-        corrected = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        # Ensure we have a valid image
+        if image_np.shape[2] == 3:
+            # Convert to LAB colour space
+            lab = cv2.cvtColor(image_np, cv2.COLOR_RGB2LAB)
+            
+            # Apply CLAHE to L channel
+            clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            
+            # Convert back to RGB
+            corrected = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        else:
+            # For single channel, apply CLAHE directly
+            clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
+            corrected = np.stack([clahe.apply(image_np[:, :, i]) for i in range(image_np.shape[2])], axis=2)
         
         # Convert back to float
         corrected = corrected.astype(np.float32) / 255.0
@@ -230,6 +251,15 @@ def visualise_lighting_correction(image: np.ndarray, config: dict) -> dict:
     Returns:
         Dictionary containing original and corrected images
     """
+    # Ensure image is in valid format
+    if image.dtype != np.float32:
+        image = image.astype(np.float32)
+        if image.max() > 1:
+            image /= 255.0
+    
+    # Clip to valid range
+    image = np.clip(image, 0, 1)
+    
     results = {'original': image}
     
     # Apply Retinex
@@ -247,7 +277,7 @@ def visualise_lighting_correction(image: np.ndarray, config: dict) -> dict:
     
     # Apply both
     if len(results) > 2:
-        combined = image
+        combined = image.copy()
         for key in ['retinex', 'clahe']:
             if key in results:
                 if key == 'retinex':
