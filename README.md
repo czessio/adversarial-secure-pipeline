@@ -41,6 +41,18 @@ A comprehensive end-to-end pipeline for developing adversarially robust image cl
 - Client-server architecture for secure computation
 - Polynomial approximations for encrypted activations
 
+## Results from testing
+
+- Biass heat map 
+![Bias Analysis Heatmap](assets/bias_heatmap.png)
+
+- Class performence analysis 
+![Class Performance Analysis](assets/class_performance_analysis.png)
+
+- Training curves
+![Training Curves](assets/training_curves.png)
+
+
 ## Installation
 
 ### Prerequisites

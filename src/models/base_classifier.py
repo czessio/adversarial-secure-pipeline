@@ -48,12 +48,12 @@ class BaseClassifier(nn.Module):
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
         
-        # Build classifier head
+        # Build classifier head with lower dropout for better gradient flow
         self.classifier = nn.Sequential(
-            nn.Dropout(self.dropout_rate),
+            nn.Dropout(self.dropout_rate * 0.5),  # Reduced dropout
             nn.Linear(num_features, 512),
             nn.ReLU(inplace=True),
-            nn.Dropout(self.dropout_rate),
+            nn.Dropout(self.dropout_rate * 0.5),  # Reduced dropout
             nn.Linear(512, self.num_classes)
         )
         
@@ -70,9 +70,17 @@ class BaseClassifier(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the model."""
+        # Extract features
         features = self.backbone(x)
+        
+        # Handle different feature shapes
         if features.dim() > 2:
             features = features.view(features.size(0), -1)
+        
+        # Ensure features require grad for FGSM
+        if self.training or x.requires_grad:
+            features = features.clone()
+            
         return self.classifier(features)
     
     def get_features(self, x: torch.Tensor) -> torch.Tensor:
@@ -158,6 +166,13 @@ class EnsembleClassifier(nn.Module):
         # Calculate variance across ensemble
         uncertainty = probs.var(dim=0).mean(dim=-1)
         return uncertainty
+    
+    def get_num_parameters(self, trainable_only: bool = False) -> int:
+        """Get total number of parameters in ensemble."""
+        total = 0
+        for model in self.models:
+            total += model.get_num_parameters(trainable_only)
+        return total
 
 
 def create_model(config: Dict[str, Any], ensemble: bool = False) -> nn.Module:

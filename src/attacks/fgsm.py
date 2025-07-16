@@ -43,11 +43,21 @@ class FGSMAttack:
         Returns:
             Adversarial examples
         """
-        # Ensure model is in eval mode
+        # Store original training mode
+        was_training = model.training
         model.eval()
         
-        # Clone input to avoid modifying original
-        x_adv = x.clone().detach().requires_grad_(True)
+        # Clone input and ensure it requires gradients
+        x_adv = x.clone().detach()
+        x_adv.requires_grad = True
+        
+        # Enable gradients for model
+        for param in model.parameters():
+            param.requires_grad = True
+        
+        # Zero any existing gradients
+        if x_adv.grad is not None:
+            x_adv.grad.zero_()
         
         # Forward pass
         outputs = model(x_adv)
@@ -61,17 +71,28 @@ class FGSMAttack:
             # For untargeted attack, maximise loss w.r.t. true class
             loss = F.cross_entropy(outputs, y)
         
-        # Calculate gradients
+        # Backward pass to get gradients
+        model.zero_grad()
         loss.backward()
         
+        # Check if gradients were computed
+        if x_adv.grad is None:
+            print("Warning: No gradients computed in FGSM. Returning original images.")
+            # Restore training mode
+            model.train(was_training)
+            return x.clone().detach()
+        
         # Get gradient sign
-        grad_sign = x_adv.grad.sign()
+        grad_sign = x_adv.grad.data.sign()
         
         # Create adversarial examples
-        x_adv = x_adv + self.epsilon * grad_sign
+        x_adv = x_adv.data + self.epsilon * grad_sign
         
         # Clip to valid range
         x_adv = torch.clamp(x_adv, self.clip_min, self.clip_max)
+        
+        # Restore original training mode
+        model.train(was_training)
         
         return x_adv.detach()
     
@@ -92,6 +113,7 @@ class FGSMAttack:
         Returns:
             Tuple of (adversarial examples, true labels, predictions on adversarial examples)
         """
+        was_training = model.training
         model.eval()
         
         all_adv_examples = []
@@ -112,6 +134,8 @@ class FGSMAttack:
             all_adv_examples.append(adv_data.cpu())
             all_labels.append(target.cpu())
             all_adv_preds.append(adv_preds.cpu())
+        
+        model.train(was_training)
         
         return (
             torch.cat(all_adv_examples),
@@ -155,13 +179,22 @@ class IterativeFGSM(FGSMAttack):
         target: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """Generate adversarial examples using I-FGSM."""
+        was_training = model.training
         model.eval()
+        
+        # Enable gradients for model
+        for param in model.parameters():
+            param.requires_grad = True
         
         # Start from original input
         x_adv = x.clone().detach()
         
         for i in range(self.num_iter):
-            x_adv.requires_grad_(True)
+            x_adv.requires_grad = True
+            
+            # Zero gradients
+            if x_adv.grad is not None:
+                x_adv.grad.zero_()
             
             # Forward pass
             outputs = model(x_adv)
@@ -173,11 +206,17 @@ class IterativeFGSM(FGSMAttack):
                 loss = F.cross_entropy(outputs, y)
             
             # Calculate gradients
+            model.zero_grad()
             loss.backward()
             
+            # Check for gradients
+            if x_adv.grad is None:
+                print(f"Warning: No gradients in I-FGSM iteration {i}")
+                break
+            
             # Update adversarial examples
-            grad_sign = x_adv.grad.sign()
-            x_adv = x_adv + self.alpha * grad_sign
+            grad_sign = x_adv.grad.data.sign()
+            x_adv = x_adv.data + self.alpha * grad_sign
             
             # Project back to epsilon ball
             delta = torch.clamp(x_adv - x, -self.epsilon, self.epsilon)
@@ -186,6 +225,7 @@ class IterativeFGSM(FGSMAttack):
             # Clip to valid range
             x_adv = torch.clamp(x_adv, self.clip_min, self.clip_max).detach()
         
+        model.train(was_training)
         return x_adv
 
 
