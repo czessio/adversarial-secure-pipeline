@@ -13,6 +13,7 @@ from datetime import datetime
 import pickle
 import traceback
 
+from src.analysis.enhanced_visualisation import setup_plotting_style
 from src.utils.data_loader import load_config, create_data_loaders, get_class_names
 from src.preprocessing.lighting_correction import create_lighting_corrected_transform
 from src.preprocessing.data_augmentation import AugmentationWrapper
@@ -23,10 +24,11 @@ from src.models.quantized_model import quantize_robust_model
 from src.attacks.fgsm import FGSMAttack
 from src.attacks.pgd import PGDAttack
 from src.analysis.bias_analysis import BiasAnalyser
-from src.analysis.visualisation import create_model_report, setup_plotting_style
+from src.analysis.enhanced_visualisation import generate_final_report
 from src.privacy.homomorphic_encryption import demonstrate_private_inference
 from src.utils.metrics import RobustnessEvaluator, calculate_efficiency_metrics
 from src.utils.training_utils import train_model
+
 
 
 class PipelineCheckpoint:
@@ -636,6 +638,10 @@ class AdversarialRobustnessPipeline:
         print("\n" + "="*50)
         print("GENERATING REPORT")
         print("="*50)
+        
+        from src.analysis.enhanced_visualisation import create_model_report
+
+
         
         # Prepare evaluation summary
         eval_summary = {}

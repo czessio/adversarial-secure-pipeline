@@ -1,4 +1,5 @@
 # Configuration for adversarial robustness pipeline
+# config/config.yaml
 
 # Data settings
 data:
@@ -37,13 +38,12 @@ model:
 
 # Training settings
 training:
-  epochs: 50 # <-- currently changing due to devleopment, should be set to 100 by default
-  learning_rate: 0.001
+  epochs: 5
+  learning_rate: 0.1
   weight_decay: 0.0001
   scheduler:
     type: "cosine"  # Options: cosine, step, exponential
-    step_size: 30
-    gamma: 0.1
+    T_max: 100
   
   early_stopping:
     enable: true
@@ -79,7 +79,7 @@ quantization:
 # Privacy settings
 privacy:
   homomorphic_encryption:
-    enable: true
+    enable: false  # Disable for speed initially
     poly_modulus_degree: 8192
     coeff_mod_bit_sizes: [60, 40, 40, 60]
     scale_bits: 40

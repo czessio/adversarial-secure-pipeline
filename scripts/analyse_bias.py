@@ -14,7 +14,7 @@ import seaborn as sns
 from src.utils.data_loader import load_config, create_data_loaders, get_class_names
 from src.models.base_classifier import create_model
 from src.analysis.bias_analysis import BiasAnalyser
-from src.analysis.visualisation import setup_plotting_style, plot_bias_analysis
+from src.analysis.enhanced_visualisation import setup_plotting_style, plot_bias_analysis
 
 
 def main(args):
