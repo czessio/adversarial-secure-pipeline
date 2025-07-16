@@ -359,13 +359,25 @@ class RobustnessEvaluator:
         
         return pd.DataFrame(results)
     
+    
+    
+    
     def _evaluate_clean(self, test_loader) -> Dict[str, float]:
         """Evaluate on clean examples."""
         tracker = MetricsTracker(self.config['model']['num_classes'])
         self.model.eval()
         
         for data, target in test_loader:
-            data, target = data.to(self.device), target.to(self.device)
+            # Handle quantized models on CPU
+            if hasattr(self.model, 'qconfig') or any(
+                isinstance(m, torch.nn.quantized.Linear)
+                for m in self.model.modules()
+            ):
+                self.device = torch.device('cpu')
+                data = data.cpu()
+                target = target.cpu()
+            else:
+                data, target = data.to(self.device), target.to(self.device)
             
             with torch.no_grad():
                 outputs = self.model(data)
@@ -381,6 +393,10 @@ class RobustnessEvaluator:
             'recall': metrics['recall'],
             'f1_score': metrics['f1_score']
         }
+
+
+    
+ 
     
     def _evaluate_attack(self, test_loader, attack) -> Dict[str, float]:
         """Evaluate against specific attack."""
@@ -388,7 +404,16 @@ class RobustnessEvaluator:
         self.model.eval()
         
         for data, target in test_loader:
-            data, target = data.to(self.device), target.to(self.device)
+            # Handle quantized models on CPU
+            if hasattr(self.model, 'qconfig') or any(
+                isinstance(m, torch.nn.quantized.Linear)
+                for m in self.model.modules()
+            ):
+                self.device = torch.device('cpu')
+                data = data.cpu()
+                target = target.cpu()
+            else:
+                data, target = data.to(self.device), target.to(self.device)
             
             # Generate adversarial examples
             adv_data = attack.generate(self.model, data, target)
