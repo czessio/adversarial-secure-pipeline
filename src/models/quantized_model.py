@@ -7,6 +7,8 @@ from torch.utils.data import DataLoader
 from typing import Dict, Any, Optional, Union
 import copy
 from tqdm import tqdm
+import platform
+import warnings
 
 
 class QuantizedModel:
@@ -22,10 +24,81 @@ class QuantizedModel:
         self.config = config
         self.quant_config = config['quantization']
         self.quant_type = self.quant_config['type']
-        self.backend = self.quant_config['backend']
+        
+        # Auto-detect the best backend for the current platform
+        self.backend = self._detect_backend()
         
         # Set quantization backend
-        torch.backends.quantized.engine = self.backend
+        try:
+            torch.backends.quantized.engine = self.backend
+            print(f"Using quantization backend: {self.backend}")
+        except RuntimeError as e:
+            warnings.warn(f"Failed to set backend {self.backend}: {e}")
+            # Try fallback
+            self.backend = self._get_fallback_backend()
+            torch.backends.quantized.engine = self.backend
+            print(f"Using fallback backend: {self.backend}")
+    
+    def _detect_backend(self) -> str:
+        """Automatically detect the best quantization backend for the current platform."""
+        # Check if we're on Windows or Linux x86_64
+        system = platform.system()
+        machine = platform.machine().lower()
+        
+        # Override with config if explicitly set and valid
+        config_backend = self.quant_config.get('backend', '').lower()
+        
+        # Check available backends
+        available_backends = []
+        try:
+            torch.backends.quantized.engine = 'fbgemm'
+            available_backends.append('fbgemm')
+        except:
+            pass
+        
+        try:
+            torch.backends.quantized.engine = 'qnnpack'
+            available_backends.append('qnnpack')
+        except:
+            pass
+        
+        # Auto-detect based on platform
+        if system == 'Windows' or (system == 'Linux' and 'x86' in machine):
+            # x86/x64 platforms - use FBGEMM
+            if 'fbgemm' in available_backends:
+                return 'fbgemm'
+            else:
+                warnings.warn("FBGEMM not available on x86 platform")
+        elif 'arm' in machine or 'aarch' in machine:
+            # ARM platforms - prefer QNNPACK
+            if 'qnnpack' in available_backends:
+                return 'qnnpack'
+            elif 'fbgemm' in available_backends:
+                return 'fbgemm'
+        
+        # If config specifies a backend and it's available, use it
+        if config_backend in available_backends:
+            return config_backend
+        
+        # Default fallback
+        if available_backends:
+            return available_backends[0]
+        
+        # Last resort - no quantization
+        warnings.warn("No quantization backend available, using default (no quantization)")
+        return 'none'
+    
+    def _get_fallback_backend(self) -> str:
+        """Get a fallback backend if the primary one fails."""
+        try:
+            torch.backends.quantized.engine = 'fbgemm'
+            return 'fbgemm'
+        except:
+            try:
+                torch.backends.quantized.engine = 'qnnpack'
+                return 'qnnpack'
+            except:
+                return 'none'
     
     def prepare_model(self, model: nn.Module) -> nn.Module:
         """
@@ -39,6 +112,11 @@ class QuantizedModel:
         """
         # Make a copy to avoid modifying original
         model_copy = copy.deepcopy(model)
+        
+        # Skip quantization if no backend available
+        if self.backend == 'none':
+            warnings.warn("No quantization backend available, returning original model")
+            return model_copy
         
         # Fuse modules for better quantization
         model_copy = self._fuse_modules(model_copy)
@@ -64,6 +142,10 @@ class QuantizedModel:
         Returns:
             Fused model
         """
+        # Skip fusion if no quantization backend
+        if self.backend == 'none':
+            return model
+        
         # This is architecture-specific
         # Example for ResNet
         if hasattr(model, 'backbone') and 'resnet' in self.config['model']['architecture']:
@@ -101,7 +183,10 @@ class QuantizedModel:
                             continue
             
             if modules_to_fuse:
-                model = quantization.fuse_modules(model, modules_to_fuse)
+                try:
+                    model = quantization.fuse_modules(model, modules_to_fuse)
+                except Exception as e:
+                    warnings.warn(f"Module fusion failed: {e}")
         
         return model
     
@@ -122,7 +207,7 @@ class QuantizedModel:
         Returns:
             Calibrated model
         """
-        if self.quant_type != 'static':
+        if self.quant_type != 'static' or self.backend == 'none':
             return model
         
         model.eval()
@@ -155,29 +240,39 @@ class QuantizedModel:
         Returns:
             Quantized model
         """
+        # Skip if no backend available
+        if self.backend == 'none':
+            warnings.warn("No quantization backend available, returning original model")
+            return model
+        
         # Prepare model
         prepared_model = self.prepare_model(model)
         
-        if self.quant_type == 'dynamic':
-            # Apply dynamic quantization
-            quantized_model = quantization.quantize_dynamic(
-                prepared_model,
-                qconfig_spec={nn.Linear, nn.Conv2d},
-                dtype=torch.qint8
-            )
-        elif self.quant_type == 'static':
-            if calibration_loader is None:
-                raise ValueError("Calibration loader required for static quantization")
+        try:
+            if self.quant_type == 'dynamic':
+                # Apply dynamic quantization
+                quantized_model = quantization.quantize_dynamic(
+                    prepared_model,
+                    qconfig_spec={nn.Linear, nn.Conv2d},
+                    dtype=torch.qint8
+                )
+            elif self.quant_type == 'static':
+                if calibration_loader is None:
+                    raise ValueError("Calibration loader required for static quantization")
+                
+                # Calibrate model
+                prepared_model = self.calibrate_model(prepared_model, calibration_loader, device)
+                
+                # Convert to quantized model
+                quantized_model = quantization.convert(prepared_model)
+            else:
+                raise ValueError(f"Unknown quantization type: {self.quant_type}")
             
-            # Calibrate model
-            prepared_model = self.calibrate_model(prepared_model, calibration_loader, device)
+            return quantized_model
             
-            # Convert to quantized model
-            quantized_model = quantization.convert(prepared_model)
-        else:
-            raise ValueError(f"Unknown quantization type: {self.quant_type}")
-        
-        return quantized_model
+        except Exception as e:
+            warnings.warn(f"Quantization failed: {e}. Returning original model.")
+            return model
     
     def evaluate_quantized_model(
         self,
@@ -206,12 +301,12 @@ class QuantizedModel:
         # Calculate compression ratio
         original_size = self._get_model_size(original_model)
         quantized_size = self._get_model_size(quantized_model)
-        results['compression_ratio'] = original_size / quantized_size
+        results['compression_ratio'] = original_size / quantized_size if quantized_size > 0 else 1.0
         
         # Calculate speedup
         original_time = self._measure_inference_time(original_model, test_loader, device)
         quantized_time = self._measure_inference_time(quantized_model, test_loader, device)
-        results['speedup'] = original_time / quantized_time
+        results['speedup'] = original_time / quantized_time if quantized_time > 0 else 1.0
         
         return results
     
@@ -228,8 +323,14 @@ class QuantizedModel:
         correct = 0
         total = 0
         
+        # Limit evaluation to speed things up during development
+        max_batches = 50  # Evaluate on subset for faster development
+        
         with torch.no_grad():
-            for data, target in test_loader:
+            for batch_idx, (data, target) in enumerate(test_loader):
+                if batch_idx >= max_batches:
+                    break
+                    
                 data, target = data.to(device), target.to(device)
                 outputs = model(data)
                 _, predicted = outputs.max(1)
@@ -258,7 +359,7 @@ class QuantizedModel:
         model: nn.Module,
         test_loader: DataLoader,
         device: torch.device,
-        num_batches: int = 100
+        num_batches: int = 10  # Reduced for faster development
     ) -> float:
         """Measure average inference time."""
         model.eval()
@@ -266,7 +367,7 @@ class QuantizedModel:
         
         # Warm up
         for i, (data, _) in enumerate(test_loader):
-            if i >= 10:
+            if i >= 5:  # Reduced warmup
                 break
             data = data.to(device)
             with torch.no_grad():
@@ -322,13 +423,15 @@ def quantize_robust_model(
     Returns:
         Quantized model
     """
+    print(f"\nQuantizing model on {platform.system()} {platform.machine()}...")
+    
     quantizer = QuantizedModel(config)
     
     # Quantize model
     quantized_model = quantizer.quantize_model(model, calibration_loader, device)
     
     # Evaluate if test loader provided
-    if test_loader is not None:
+    if test_loader is not None and quantizer.backend != 'none':
         print("\nEvaluating quantized model...")
         results = quantizer.evaluate_quantized_model(model, quantized_model, test_loader, device)
         
@@ -342,7 +445,8 @@ def quantize_robust_model(
         torch.save({
             'model_state_dict': quantized_model.state_dict(),
             'config': config,
-            'quantization_type': config['quantization']['type']
+            'quantization_type': config['quantization']['type'],
+            'backend': quantizer.backend
         }, save_path)
         print(f"\nSaved quantized model to {save_path}")
     

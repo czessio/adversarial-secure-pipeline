@@ -4,8 +4,8 @@
 data:
   dataset_name: "CIFAR10"  # Options: CIFAR10, CIFAR100, ImageNet
   data_dir: "./data"
-  batch_size: 128
-  num_workers: 0
+  batch_size: 256
+  num_workers: 4
   validation_split: 0.2
   random_seed: 42
 
@@ -37,7 +37,7 @@ model:
 
 # Training settings
 training:
-  epochs: 5 # <-- currently changing due to devleopment, should be set to 100 by default
+  epochs: 50 # <-- currently changing due to devleopment, should be set to 100 by default
   learning_rate: 0.001
   weight_decay: 0.0001
   scheduler:
@@ -73,7 +73,7 @@ adversarial:
 quantization:
   enable: true
   type: "dynamic"  # Options: dynamic, static
-  backend: "qnnpack"  # Options: fbgemm (x86), qnnpack (ARM)
+  backend: "fbgemm"  # Options: fbgemm (x86), qnnpack (ARM)
   calibration_batches: 100
 
 # Privacy settings

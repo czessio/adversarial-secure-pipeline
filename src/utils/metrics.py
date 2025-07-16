@@ -299,7 +299,15 @@ class RobustnessEvaluator:
         """
         self.model = model
         self.config = config
-        self.device = torch.device(config['hardware']['device'])
+        
+        # Auto-detect device availability
+        device_config = config['hardware']['device']
+        if device_config == 'cuda' and not torch.cuda.is_available():
+            print("  RobustnessEvaluator: CUDA not available, using CPU")
+            self.device = torch.device('cpu')
+        else:
+            self.device = torch.device(device_config if device_config != 'cuda' or torch.cuda.is_available() else 'cpu')
+    
     
     def evaluate_comprehensive(
         self,

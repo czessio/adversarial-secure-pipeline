@@ -1,0 +1,78 @@
+# GPU-optimised configuration for RTX 4080
+
+# Data settings
+data:
+  dataset_name: "CIFAR10"
+  data_dir: "./data"
+  batch_size: 256
+  num_workers: 4
+  validation_split: 0.2
+  random_seed: 42
+
+# Model settings
+model:
+  architecture: "resnet18"
+  num_classes: 10
+  pretrained: true
+  dropout_rate: 0.5
+
+# Training settings
+training:
+  epochs: 100
+  learning_rate: 0.1
+  weight_decay: 0.0001
+  scheduler:
+    type: "cosine"
+    T_max: 100
+  
+  early_stopping:
+    enable: true
+    patience: 10
+    min_delta: 0.001
+
+# Adversarial settings
+adversarial:
+  attacks:
+    fgsm:
+      epsilon: 0.03
+      targeted: false
+    
+    pgd:
+      epsilon: 0.03
+      alpha: 0.01
+      num_steps: 40
+      random_start: true
+  
+  training:
+    enable: true
+    attack_ratio: 0.5
+    epsilon_schedule: "linear"
+    max_epsilon: 0.03
+
+# Quantisation settings
+quantization:
+  enable: true
+  type: "dynamic"
+  backend: "fbgemm"
+  calibration_batches: 100
+
+# Privacy settings
+privacy:
+  homomorphic_encryption:
+    enable: false  # Disable for speed initially
+    poly_modulus_degree: 8192
+    coeff_mod_bit_sizes: [60, 40, 40, 60]
+    scale_bits: 40
+    batch_encode: true
+
+# Hardware settings
+hardware:
+  device: "cuda"
+  mixed_precision: true
+  cudnn_benchmark: true
+
+# Logging settings
+logging:
+  level: "INFO"
+  save_dir: "./results/logs"
+  tensorboard: true

@@ -30,7 +30,13 @@ class BiasAnalyser:
         self.config = config
         self.class_names = class_names
         self.num_classes = len(class_names)
-        self.device = torch.device(config['hardware']['device'])
+        # Auto-detect device availability
+        device_config = config['hardware']['device']
+        if device_config == 'cuda' and not torch.cuda.is_available():
+            print("Warning: CUDA not available, using CPU")
+            self.device = torch.device('cpu')
+        else:
+            self.device = torch.device(device_config)
         
         # Initialise attacks for robustness analysis
         self.fgsm = FGSMAttack(epsilon=config['adversarial']['attacks']['fgsm']['epsilon'])
