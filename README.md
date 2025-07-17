@@ -293,7 +293,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - PyTorch team for the deep learning framework
 - Microsoft Research for the SEAL homomorphic encryption library
-- The adversarial robustness research community
 
 ## Contact
 
